@@ -1,4 +1,4 @@
-# MCTS - Monte Carlo Search Tree
+# MCTS - Monte Carlo Tree Search
 
 **:star2: MCTS - C++ framework for Monte-Carlo Tree Search :star2:**
 
