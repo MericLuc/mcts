@@ -45,6 +45,37 @@ namespace mcts {
 
 /*************************************************************************************************/
 /*!
+ * @brief Very basic stopwatch to measure ellapsed time since creation and tops.
+ */
+template<class Clock = std::chrono::high_resolution_clock, class Unit = std::chrono::milliseconds>
+class stopwatch
+{
+public:
+    explicit stopwatch() noexcept
+      : _start{ Clock::now() }
+      , _top{ _start }
+    {}
+
+    Unit top() noexcept
+    {
+        auto now{ Clock::now() };
+        Unit ret{ std::chrono::duration_cast<Unit>(now - _top) };
+        _top = now;
+        return ret;
+    }
+
+    Unit elapsed() const noexcept
+    {
+        return std::chrono::duration_cast<Unit>(Clock::now() - _start);
+    }
+
+private:
+    typedef std::chrono::time_point<Clock> TimePt;
+    const TimePt                           _start, _top;
+};
+
+/*************************************************************************************************/
+/*!
  * @brief The Printable class provide an interface for printable objects.
  *
  * @note This is mainly used for debugging purposes.
@@ -98,7 +129,7 @@ public:
  * It can be applied to a \a State in order to modify it.
  * @note Derived classes should be default constructible.
  */
-template<class St, typename = std::enable_if_t<std::is_base_ofase_of_v<State, St>>>
+template<class St>
 class Move : public Printable
 {
 public:
@@ -142,10 +173,7 @@ struct Stat
 /*!
  * @brief The expansion strategy controls how leaf nodes/states are expended.
  */
-template<class St,
-         class Mv,
-         typename = std::enable_if_t<std::is_base_of_v<State, St>>,
-         typename = std::enable_if_t<std::is_base_of_v<Move, Mv>>>
+template<class St, class Mv>
 class ExpansionStrategy
 {
 public:
@@ -169,10 +197,7 @@ public:
 /*!
  * @brief TODO
  */
-template<class St,
-         class Mv,
-         typename = std::enable_if_t<std::is_base_of_v<State, St>>,
-         typename = std::enable_if_t<std::is_base_of_v<Move, Mv>>>
+template<class St, class Mv>
 class SimulationStrategy
 {
 public:
@@ -192,10 +217,7 @@ public:
 /*!
  * @brief The Node class represents a node of the Monte-Carlo Tree.
  */
-template<class St,
-         class Mv,
-         typename = std::enable_if_t<std::is_base_of_v<State, St>>,
-         typename = std::enable_if_t<std::is_base_of_v<Move, Mv>>>
+template<class St, class Mv>
 class Node
 {
 public:
@@ -237,16 +259,16 @@ private:
     Stat _stats; /*< The statistics associated to this node (updated by every step) */
 };
 
-template<class St,
-         class Mv,
-         typename = std::enable_if_t<std::is_base_of_v<State, St>>,
-         typename = std::enable_if_t<std::is_base_of_v<Move, Mv>>>
+template<class St, class Mv>
 class MCTS
 {
 public:
-    MCTS(const St&                     initialState,
-         const SimulationStrategy<St>& simulationStrategy,
-         const ExpansionStrategy<St>&  expansionStrategy)
+    using N = Node<St, Mv>;
+
+public:
+    MCTS(const St&                         initialState,
+         const SimulationStrategy<St, Mv>& simulationStrategy,
+         const ExpansionStrategy<St, Mv>&  expansionStrategy)
     noexcept
       : _root{ N(initialState, Mv()) }
       , _sim{ simulationStrategy }
@@ -257,7 +279,7 @@ public:
 
     ~MCTS() noexcept
     {
-        for (auto& [st, n] : nodes) {
+        for (auto& [st, n] : _nodes) {
             if (nullptr != n) {
                 delete (n);
                 n = nullptr;
@@ -359,7 +381,7 @@ public:
              *
              * Propagate the result of the simulation backwards from the leaf node to the root.
              */
-            auto eval{ st.eval() };
+            auto eval{ cur_node->state().eval() };
             while (nullptr != cur_node) {
                 cur_node->stats().update(eval);
                 cur_node = cur_node->parent();
@@ -386,14 +408,14 @@ public:
     }
 
     // Setters
-    void     set_time_max(uint32_t t) noexcept { _time_max = std::chrono::milliseconds(t); }
-    void     set_default_c(float c) noexcept { _C = c; }
-    uint32_t set_expand_thresh(uint32_t thresh) noexcept { _vis_expand_thresh = thresh; }
-    uint32_t set_uct_thresh(uint32_t thresh) noexcept { _vis_uct_thresh = thresh; }
+    void set_time_max(uint32_t t) noexcept { _time_max = std::chrono::milliseconds(t); }
+    void set_default_c(float c) noexcept { _C = c; }
+    void set_expand_thresh(uint32_t thresh) noexcept { _vis_expand_thresh = thresh; }
+    void set_uct_thresh(uint32_t thresh) noexcept { _vis_uct_thresh = thresh; }
 
 protected:
-    SimulationStrategy<St> _sim;
-    ExpansionStrategy<St>  _exp;
+    SimulationStrategy<St, Mv> _sim;
+    ExpansionStrategy<St, Mv>  _exp;
 
 private:
     // Tree related structures
@@ -413,38 +435,6 @@ private:
     static constexpr float    default_c{ 0.5 };         /*< UCT constant */
     static constexpr uint32_t default_vis{ 7 };         /*< nb of visits before expansion */
     static constexpr uint32_t default_vis_thresh{ 30 }; /*< Do not apply UCT if vis_count < this */
-
-private:
-    /*!
-     * @brief Very basic stopwatch to measure ellapsed time since creation and tops.
-     */
-    template<class Clock = std::chrono::high_resolution_clock,
-             class Unit = std::chrono::milliseconds>
-    class stopwatch
-    {
-    public:
-        explicit stopwatch() noexcept
-          : _start{ Clock::now() }
-          , _top{ _start }
-        {}
-
-        Unit top() noexcept
-        {
-            auto now{ Clock::now() };
-            Unit ret{ std::chrono::duration_cast<Unit>(now - top) };
-            top = now;
-            return ret;
-        }
-
-        Unit elapsed() const noexcept
-        {
-            return std::chrono::duration_cast<Unit>(Clock::now() - _start);
-        }
-
-    private:
-        typedef std::chrono::time_point<Clock> TimePt;
-        const TimePt                           _start, top;
-    };
 };
 
 } // namespace mcts
