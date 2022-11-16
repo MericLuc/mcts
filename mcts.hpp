@@ -255,7 +255,7 @@ public:
      * @param mv The move that led to that node
      * @param parent The parent of the node
      */
-    Node(const St& state, const Mv& mv, const N* parent = nullptr) noexcept
+    Node(const St& state, const Mv& mv, N* parent = nullptr) noexcept
       : _state{ state }
       , _move{ mv }
       , _parent{ parent }
@@ -332,7 +332,7 @@ private:
      */
     const St      _state;    /*< The game state associated to the node */
     const Mv      _move;     /*< The move that led to that state */
-    const N*      _parent;   /*< The node that produced it */
+    N*            _parent;   /*< The node that produced it */
     std::list<N*> _children; /*< Children emplaced (either by simulation or expansion) */
 
     /**
@@ -357,11 +357,11 @@ public:
          const std::shared_ptr<TerminalCriteria<St>>&       terminalCriteria,
          const std::shared_ptr<TerminalEval<St>>&           terminalEval)
     noexcept
-      : _root{ new N(initialState, Mv()) }
-      , _sim{ simulationStrategy }
+      : _sim{ simulationStrategy }
       , _exp{ expansionStrategy }
       , _termCrit{ terminalCriteria }
       , _termEval{ terminalEval }
+      , _root{ new N(initialState, Mv()) }
     {}
 
     ~MCTS() noexcept
@@ -434,7 +434,7 @@ public:
             /**
              * Simulation
              */
-            _simulated(cur_node);
+            _simulate(cur_node);
 
             /**
              * BackPropagation
