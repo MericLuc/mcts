@@ -36,6 +36,7 @@
 // Standard headers
 #include <chrono>
 #include <cmath>
+#include <list>
 #include <map>
 #include <memory>
 #include <ostream>
@@ -251,18 +252,23 @@ public:
     /*!
      * @brief Node
      * @param state The state associated to the node
-     * @param move The move that led to that node
+     * @param mv The move that led to that node
      * @param parent The parent of the node
      */
-    Node(const St& state, const Mv& move, const N* parent = nullptr) noexcept
+    Node(const St& state, const Mv& mv, const N* parent = nullptr) noexcept
       : _state{ state }
-      , _move{ move }
+      , _move{ mv }
       , _parent{ parent }
     {
         if (nullptr != _parent)
             _parent->add_child(this);
     }
-    ~Node() noexcept = default;
+    ~Node() noexcept
+    {
+        if (!is_leaf())
+            for (auto& nxt : _children)
+                delete (nxt);
+    }
 
     /*!
      * \brief is_leaf evaluates if the node is a leaf
@@ -274,7 +280,27 @@ public:
      * \brief add_child add a child to the node
      * \param child the child to be added
      */
-    void add_child(N* child) noexcept { _children[child->move()] = child; }
+    void add_child(N* child) noexcept { _children.push_back(child); }
+
+    /*!
+     * \brief grab_child get a child  of the node. It will give you the ownership over that child
+     * (and the responsability to delete it). After that call, the corresponding node is not a child
+     * of the current node anymore.
+     * \param mv the move
+     * \return the child node if it exists, nullptr otherwise.
+     */
+    N* grab_child(const Mv& mv) noexcept
+    {
+        N* ret{ nullptr };
+        for (auto& child : _children) {
+            if (mv == child->move()) {
+                ret = child;
+                _children.remove(child);
+                break;
+            }
+        }
+        return ret;
+    }
 
     /*!
      * \brief update update the statistics associated to the node with the given result.
@@ -304,10 +330,10 @@ private:
     /**
      * Tree related parameters
      */
-    const St         _state;    /*< The game state associated to the node */
-    const Mv         _move;     /*< The move that led to that state */
-    const N*         _parent;   /*< The node that produced it */
-    std::map<Mv, N*> _children; /*< Children emplaced (either by simulation or expansion) */
+    const St      _state;    /*< The game state associated to the node */
+    const Mv      _move;     /*< The move that led to that state */
+    const N*      _parent;   /*< The node that produced it */
+    std::list<N*> _children; /*< Children emplaced (either by simulation or expansion) */
 
     /**
      * Stats related parameters
@@ -331,39 +357,38 @@ public:
          const std::shared_ptr<TerminalCriteria<St>>&       terminalCriteria,
          const std::shared_ptr<TerminalEval<St>>&           terminalEval)
     noexcept
-      : _root{ N(initialState, Mv()) }
+      : _root{ new N(initialState, Mv()) }
       , _sim{ simulationStrategy }
       , _exp{ expansionStrategy }
       , _termCrit{ terminalCriteria }
       , _termEval{ terminalEval }
-    {
-        _nodes[initialState] = &_root;
-    }
+    {}
 
     ~MCTS() noexcept
     {
-        // TODO - laisser les nodes tuer leurs enfants ?
-        for (auto& [st, n] : _nodes) {
-            if (nullptr != n) {
-                delete (n);
-                n = nullptr;
-            }
-        }
-        _nodes.clear();
+        if (nullptr != _root)
+            delete (_root);
     }
 
     /*!
      * \brief advance updates the tree with the given move
      * This will free previously allocated parts of the tree that are no longer relevant.
-     * \param move the move to update the tree with
+     * \param mv the move to update the tree with
      * \return true in case of success, false otherwise
      */
-    [[maybe_unused]] bool advance(const Mv& move) noexcept
+    [[maybe_unused]] bool advance(const Mv& mv) noexcept
     {
-        // TODO
-        auto ret{ true };
+        if (nullptr == _root)
+            return false;
 
-        return ret;
+        auto next_root{ _root->grab_child(mv) };
+        if (nullptr == next_root)
+            return false;
+
+        delete (_root);
+        _root = next_root;
+
+        return true;
     }
 
     /*!
@@ -372,7 +397,8 @@ public:
      */
     Mv compute(void) noexcept
     {
-        if (nullptr == _sim || nullptr == _exp || nullptr == _termCrit || nullptr == _termEval)
+        if (nullptr == _root || nullptr == _sim || nullptr == _exp || nullptr == _termCrit ||
+            nullptr == _termEval)
             return {};
 
         /**
@@ -384,7 +410,7 @@ public:
          */
         stopwatch sw;
         while (_time_max > sw.elapsed()) {
-            N* cur_node{ &_root };
+            N* cur_node{ _root };
 
             /**
              * Selection
@@ -450,7 +476,7 @@ private:
             while (!n->is_leaf()) {
                 float max_uct{ 0 };
                 N*    sel_node{ nullptr };
-                for (const auto& [mv, nxt] : n->children()) {
+                for (const auto& nxt : n->children()) {
                     float uct{ n->val() +
                                _C * (float)sqrt(log(n->visit_count()) / nxt->visit_count()) };
                     if (uct >= max_uct) {
@@ -477,8 +503,7 @@ private:
                 auto new_st{ st };
                 mv = _exp->expand(new_st);
                 mv.apply(new_st);
-                _nodes[new_st] = new N(new_st, mv, n);
-                n = _nodes[new_st];
+                n = new N(new_st, mv, n);
             }
         } else {
             // expand the first
@@ -486,8 +511,7 @@ private:
                 auto new_st{ st };
                 mv = _exp->expand(new_st);
                 mv.apply(new_st);
-                _nodes[new_st] = new N(new_st, mv, n);
-                n = _nodes[new_st];
+                n = new N(new_st, mv, n);
             }
         }
     }
@@ -505,8 +529,7 @@ private:
             // Create next node from the move
             mv = _sim->simulate(st);
             mv.apply(st);
-            _nodes[st] = new N(st, mv, n);
-            n = _nodes[st];
+            n = new N(st, mv, n);
         }
     }
 
@@ -532,10 +555,10 @@ private:
     {
         Mv       ret;
         uint32_t max_visit_count{ 0 };
-        for (const auto& [mv, n] : _root.children()) {
+        for (const auto& n : _root->children()) {
             if (n->visit_count() >= max_visit_count) {
                 max_visit_count = n->visit_count();
-                ret = mv;
+                ret = n->move();
             }
         }
 
@@ -556,9 +579,7 @@ private:
     /**
      * Tree related structures
      */
-
-    N                _root;  /*< The root of the tree */
-    std::map<St, N*> _nodes; /*< Container for every nodes of the tree */
+    N* _root;
 
     /**
      * Customizable params
