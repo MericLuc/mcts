@@ -13,28 +13,31 @@
  *<li> State : Should be able to represent any state of the game.</li>
  *<li> Move : Represents a move of the game. When performed (on a given \a State), it alters the
  *State of the game.</li>
- *<li> ExpansionStrategy : The expansion strategy used to create/store new child(ren) from a leaf
- *node. Allows to decide whether a node should be expanded or not.</li>
- *<li> SimulationStrategy : The simulation strategy is used to select moves in self-play until the
+ *<li> TerminalCriteria : This allow MCTS to determinate a final state. </li>
+ *<li> TerminalEval : This allow MCTS to evaluate a final state (and backpropagate the eval). <:li>
+ *<li> ExpansionStrategy : The expansion strategy used to create/store new child(ren) from a
+ *leaf node. Allows to decide whether a node should be expanded or not.</li>
+ *<li> SimulationStrategy: The simulation strategy is used to select moves in self-play until the
  *end of the game. This is where you should put your simulation strategy.</li>
  * </ul>
  * @author lhm
  *
  * @note I could not manage to provide fully customizable mcts implementation and had to make
  *implementation choices :
- * <ul>
- * <li> Selection : Fixed using UCT (Upper Confidence Bound applied to Trees)</li>
- * <li> Expansion : Ideally, the user should be able to choose how he wants to expand a leaf node.
- * (One node ? more ? all possible children ?) and know whether its expansion is not alreay stored
- *in the tree. </li>
- * <li> Final move selection : this implementation uses the "Robust child", but there are others
- *(max child, robust-max child, secure child...) </li>
+ *<ul>
+ *<li> Selection : Fixed using UCT (Upper Confidence Bound applied to Trees)</li>
+ *<li> Expansion : Ideally, the user should be able to choose how he wants to expand a leaf node.
+ *The current implementation is 'one node per simulated game + children of a node when its visit
+ *count equals MCTS::_vis_expand_thresh (\see MCTS::set_expand_thresh()) </li>
+ *<li> Final move selection : this implementation uses the "Robust child" (i.e. the most visited
+ *one) but there are others (max child, robust-max child, secure child...) </li>
  */
 
 // Standard headers
 #include <chrono>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <ostream>
 #include <type_traits>
 
@@ -46,6 +49,9 @@ namespace mcts {
 /*************************************************************************************************/
 /*!
  * @brief Very basic stopwatch to measure ellapsed time since creation and tops.
+ *
+ * @note You do not have to use it directly. It could have lived under mcts::MCTS but it still might
+ * be of help to have it...
  */
 template<class Clock = std::chrono::high_resolution_clock, class Unit = std::chrono::milliseconds>
 class stopwatch
@@ -55,6 +61,7 @@ public:
       : _start{ Clock::now() }
       , _top{ _start }
     {}
+    ~stopwatch() noexcept = default;
 
     Unit top() noexcept
     {
@@ -113,14 +120,50 @@ private:
 class State : public Printable
 {
 public:
+    State() noexcept = default;
     virtual ~State() noexcept = default;
+};
+
+/*************************************************************************************************/
+/*!
+ * @brief The TerminalCriteria is the interface that allows to know whether a \a State is terminal
+ * (i.e. no more \a Move can be produced from it).
+ */
+template<class St>
+class TerminalCriteria
+{
+public:
+    TerminalCriteria() noexcept = default;
+    virtual ~TerminalCriteria() noexcept = default;
 
     /*!
-     * \brief eval an evaluation function of the current state of the game.
-     * \return a value that should be 0 if the state is not final,
-     * 1 if the result is good for the player, -1 if it is negative for the player, 0.5 otherwise.
+     * \brief finished evaluates if the given state is terminal (i.e. the game is over)
+     * \param state the state of the game
+     * \return true if the state is terminal, false otherwise
      */
-    virtual int32_t eval(void) noexcept = 0;
+    virtual bool finished(const St& state) noexcept = 0;
+};
+
+/*************************************************************************************************/
+/*!
+ * @brief The TerminalEval is the interface that allows to evaluate a final \a State
+ * @note Your evaluation should be positive when the final state is favorable to you, negative
+ * otherwise.
+ */
+template<class St>
+class TerminalEval
+{
+public:
+    TerminalEval() noexcept = default;
+    virtual ~TerminalEval() noexcept = default;
+
+    /*!
+     * \brief eval an evaluation function of a final state (\see TerminalCriteria) of the game.
+     * \param state the state of the game
+     * \return a value that should be positive if the result is good for the player, negative if it
+     * is negative for the player, something else otherwise.
+     */
+    virtual int32_t eval(const St& state) noexcept = 0;
 };
 
 /*************************************************************************************************/
@@ -133,40 +176,17 @@ template<class St>
 class Move : public Printable
 {
 public:
-    operator bool() noexcept { return _possible; }
-
-public:
-    Move(bool possible = false) noexcept
-      : _possible{ possible }
-    {}
+    Move() noexcept = default;
     virtual ~Move() noexcept = default;
 
     /*!
      * @brief apply Apply the move to a given \a State.
      * @param state the state to apply the move to.
-     *
+     * @return true if the application of the move changed the state of the game, false otherwise.
      * @note This should modify the state of the game, unless the move is forbidden for the given
      * state.
      */
-    virtual void apply(St& state) noexcept = 0;
-
-protected:
-    bool _possible;
-};
-
-/*************************************************************************************************/
-struct Stat
-{
-    uint32_t visit_count{ 0 }; /*< The number of times the node has been visited */
-    uint32_t res_count{ 0 };   /*< The total of every results backpropagated to this node */
-    float    val{ 0 };         /*< The value computed for the node - updated by backPropagation */
-
-    void update(int32_t res) noexcept
-    {
-        ++visit_count;
-        res_count += res;
-        val = (float)res_count / visit_count;
-    }
+    [[maybe_unused]] virtual bool apply(St& state) noexcept = 0;
 };
 
 /*************************************************************************************************/
@@ -177,40 +197,44 @@ template<class St, class Mv>
 class ExpansionStrategy
 {
 public:
+    explicit ExpansionStrategy() noexcept = default;
+    virtual ~ExpansionStrategy() noexcept = default;
+
     /*!
      * \brief expand Produces one \a Move from a given \a State.
      * The move will lead to the creation/storage of a new node.
      * \note The produced move must not lead to already expanded nodes.
      * To ensure this, you should make sure that subsequent calls to expand (on the same state) will
      * lead to different moves.
-     *
-     * In case there is nothing to expand (i.e. final State), you should create an impossible move.
-     * (\see Move::_possible)
      */
     virtual Mv expand(const St& state) noexcept = 0;
 
-    explicit ExpansionStrategy() noexcept = default;
-    virtual ~ExpansionStrategy() noexcept = default;
+    /*!
+     * \brief is_expandable evaluates if the given state is expandable
+     * \param state the state of the game
+     * \return true if the state is expandable (i.e. it is not final and there are moves left that
+     * the \a ExpansionStrategy never returned).
+     */
+    virtual bool is_expandable(const St& state) noexcept = 0;
 };
 
 /*************************************************************************************************/
 /*!
- * @brief TODO
+ * @brief
  */
 template<class St, class Mv>
 class SimulationStrategy
 {
 public:
+    explicit SimulationStrategy() noexcept = default;
+    virtual ~SimulationStrategy() noexcept = default;
+
     /*!
      * \brief simulate creates a \a Move that will be performed on the current state to
      * simulate a game.
-     * \return the move produced by the simulation. It there are no move to perform (i.e. the state
-     * is final), it should return an impossible move (\see Move::_possible)
+     * \return the move produced by the simulation.
      */
     virtual Mv simulate(const St& state) noexcept = 0;
-
-    explicit SimulationStrategy() noexcept = default;
-    virtual ~SimulationStrategy() noexcept = default;
 };
 
 /*************************************************************************************************/
@@ -234,29 +258,64 @@ public:
       : _state{ state }
       , _move{ move }
       , _parent{ parent }
-      , _stats{}
     {
         if (nullptr != _parent)
             _parent->add_child(this);
     }
     ~Node() noexcept = default;
 
-    const auto& state(void) noexcept { return _state; }
-    const auto& move(void) noexcept { return _move; }
-    const auto  parent(void) noexcept { return _parent; }
-    const auto& children(void) noexcept { return _children; }
-    auto&       stats(void) noexcept { return _stats; }
+    /*!
+     * \brief is_leaf evaluates if the node is a leaf
+     * \return true if it is a leaf, false otherwise.
+     */
+    bool is_leaf(void) const noexcept { return std::empty(_children); }
 
+    /*!
+     * \brief add_child add a child to the node
+     * \param child the child to be added
+     */
     void add_child(N* child) noexcept { _children[child->move()] = child; }
 
-protected:
+    /*!
+     * \brief update update the statistics associated to the node with the given result.
+     * \param res the result (obtained from a simulation).
+     */
+    void update(int32_t res) noexcept
+    {
+        ++_visit_count;
+        _res_count += res;
+        _val = (float)_res_count / _visit_count;
+    }
+
+    /**
+     * Getters
+     */
+
+    const auto& state(void) noexcept { return _state; }
+    const auto& move(void) noexcept { return _move; }
+    auto        parent(void) noexcept { return _parent; }
+    const auto& children(void) noexcept { return _children; }
+
+    const auto& visit_count(void) noexcept { return _visit_count; }
+    const auto& res_count(void) noexcept { return _res_count; }
+    const auto& val(void) noexcept { return _val; }
+
 private:
+    /**
+     * Tree related parameters
+     */
     const St         _state;    /*< The game state associated to the node */
     const Mv         _move;     /*< The move that led to that state */
     const N*         _parent;   /*< The node that produced it */
     std::map<Mv, N*> _children; /*< Children emplaced (either by simulation or expansion) */
 
-    Stat _stats; /*< The statistics associated to this node (updated by every step) */
+    /**
+     * Stats related parameters
+     * updated during back-propagation
+     */
+    uint32_t _visit_count{ 0 }; /*< The number of times the node has been visited */
+    uint32_t _res_count{ 0 };   /*< The total of every results backpropagated to this node */
+    float    _val{ 0 };         /*< The value computed for the node - updated by backPropagation */
 };
 
 template<class St, class Mv>
@@ -266,19 +325,24 @@ public:
     using N = Node<St, Mv>;
 
 public:
-    MCTS(const St&                         initialState,
-         const SimulationStrategy<St, Mv>& simulationStrategy,
-         const ExpansionStrategy<St, Mv>&  expansionStrategy)
+    MCTS(const St&                                          initialState,
+         const std::shared_ptr<SimulationStrategy<St, Mv>>& simulationStrategy,
+         const std::shared_ptr<ExpansionStrategy<St, Mv>>&  expansionStrategy,
+         const std::shared_ptr<TerminalCriteria<St>>&       terminalCriteria,
+         const std::shared_ptr<TerminalEval<St>>&           terminalEval)
     noexcept
       : _root{ N(initialState, Mv()) }
       , _sim{ simulationStrategy }
       , _exp{ expansionStrategy }
+      , _termCrit{ terminalCriteria }
+      , _termEval{ terminalEval }
     {
         _nodes[initialState] = &_root;
     }
 
     ~MCTS() noexcept
     {
+        // TODO - laisser les nodes tuer leurs enfants ?
         for (auto& [st, n] : _nodes) {
             if (nullptr != n) {
                 delete (n);
@@ -289,13 +353,30 @@ public:
     }
 
     /*!
+     * \brief advance updates the tree with the given move
+     * This will free previously allocated parts of the tree that are no longer relevant.
+     * \param move the move to update the tree with
+     * \return true in case of success, false otherwise
+     */
+    [[maybe_unused]] bool advance(const Mv& move) noexcept
+    {
+        // TODO
+        auto ret{ true };
+
+        return ret;
+    }
+
+    /*!
      * @brief compute Perform the MCTS algorithm
      * \return The next move to play
      */
     Mv compute(void) noexcept
     {
+        if (nullptr == _sim || nullptr == _exp || nullptr == _termCrit || nullptr == _termEval)
+            return {};
+
         /**
-         * while(time) {
+         * while(there is time left) {
          *  4 steps (selection, expansion, simulation, backpropagation)
          * }
          *
@@ -312,26 +393,9 @@ public:
              * If visit count > _vis_uct_thresh
              *     Select the node n in (reachable from cur_node)
              *     that maximizes UCT.
-             * else use the simulation strategy
+             * else use the simulation strategy (not impl)
              */
-            {
-                if (cur_node->stats().visit_count > _vis_uct_thresh) {
-                    while (!std::empty(cur_node->children())) {
-                        float max_uct{ 0 };
-                        N*    sel_node{ nullptr };
-                        for (const auto& [mv, n] : cur_node->children()) {
-                            float uct{ cur_node->stats().val +
-                                       _C * (float)sqrt(log(cur_node->stats().visit_count) /
-                                                        n->stats().visit_count) };
-                            if (uct >= max_uct) {
-                                sel_node = n;
-                                max_uct = uct;
-                            }
-                        }
-                        cur_node = sel_node;
-                    }
-                }
-            }
+            _select(cur_node);
 
             /**
              * Expansion
@@ -339,53 +403,19 @@ public:
              * - Expand the first node that is not in the tree
              * - Also expand all the children of a node when its visit_count == _vis_expand_thresh
              */
-            {
-                auto st{ St(cur_node->state()) };
-                auto mv{ Mv() };
-                if (cur_node->stats().visit_count == _vis_expand_thresh) {
-                    // expand all
-                    while ((mv = _exp.expand(st))) {
-                        auto new_st{ st };
-                        mv.apply(new_st);
-                        _nodes[new_st] = new N(new_st, mv, cur_node);
-                        cur_node = _nodes[new_st];
-                    }
-                } else {
-                    // expand the first
-                    mv = _exp.expand(st);
-                    if (mv) {
-                        auto new_st{ st };
-                        mv.apply(new_st);
-                        _nodes[new_st] = new N(new_st, mv, cur_node);
-                        cur_node = _nodes[new_st];
-                    }
-                }
-            }
+            _expand(cur_node);
 
             /**
              * Simulation
              */
-            {
-                auto st{ St(cur_node->state()) };
-                auto mv{ Mv() };
-                while ((mv = _sim.simulate(cur_node->state()))) {
-                    // Create next node from the move
-                    mv.apply(st);
-                    _nodes[st] = new N(st, mv, cur_node);
-                    cur_node = _nodes[st];
-                }
-            }
+            _simulated(cur_node);
 
             /**
              * BackPropagation
              *
              * Propagate the result of the simulation backwards from the leaf node to the root.
              */
-            auto eval{ cur_node->state().eval() };
-            while (nullptr != cur_node) {
-                cur_node->stats().update(eval);
-                cur_node = cur_node->parent();
-            }
+            _backpropagate(cur_node);
         }
 
         /**
@@ -393,44 +423,161 @@ public:
          *
          * The best move is the root child that maximizes the visit_count
          */
-        {
-            Mv       ret;
-            uint32_t max_visit_count{ 0 };
-            for (const auto& [mv, n] : _root.children()) {
-                if (n->stats().visit_count >= max_visit_count) {
-                    max_visit_count = n->stats().visit_count;
-                    ret = mv;
-                }
-            }
-
-            return ret;
-        }
+        return _bestMoveSelection();
     }
 
-    // Setters
+    /**
+     * Setters
+     */
     void set_time_max(uint32_t t) noexcept { _time_max = std::chrono::milliseconds(t); }
     void set_default_c(float c) noexcept { _C = c; }
     void set_expand_thresh(uint32_t thresh) noexcept { _vis_expand_thresh = thresh; }
     void set_uct_thresh(uint32_t thresh) noexcept { _vis_uct_thresh = thresh; }
 
+private:
+    /**
+     * 4 stages implementations
+     * + Final move selection
+     */
+
+    /*!
+     * \brief _select implementation of the "selection stage"
+     * \param n the initial node, will be modified during execution to point to the selcted node
+     */
+    void _select(N* n) noexcept
+    {
+        if (n->visit_count() > _vis_uct_thresh) {
+            while (!n->is_leaf()) {
+                float max_uct{ 0 };
+                N*    sel_node{ nullptr };
+                for (const auto& [mv, nxt] : n->children()) {
+                    float uct{ n->val() +
+                               _C * (float)sqrt(log(n->visit_count()) / nxt->visit_count()) };
+                    if (uct >= max_uct) {
+                        sel_node = nxt;
+                        max_uct = uct;
+                    }
+                }
+                n = sel_node;
+            }
+        }
+    }
+
+    /*!
+     * \brief _expand implementation of the "expansion stage"
+     * \param n the initial node, will be modified during execution to point to the expanded node
+     */
+    void _expand(N* n) noexcept
+    {
+        const auto& st{ St(n->state()) };
+        auto        mv{ Mv() };
+        if (n->visit_count() == _vis_expand_thresh) {
+            // expand all
+            while (_exp->is_expandable(st)) {
+                auto new_st{ st };
+                mv = _exp->expand(new_st);
+                mv.apply(new_st);
+                _nodes[new_st] = new N(new_st, mv, n);
+                n = _nodes[new_st];
+            }
+        } else {
+            // expand the first
+            if (_exp->is_expandable(st)) {
+                auto new_st{ st };
+                mv = _exp->expand(new_st);
+                mv.apply(new_st);
+                _nodes[new_st] = new N(new_st, mv, n);
+                n = _nodes[new_st];
+            }
+        }
+    }
+
+    /*!
+     * \brief _simulate implementation of the "simulation stage"
+     * \param n the initial node, will be modified during execution to point to the node of the
+     * final simulation move.
+     */
+    void _simulate(N* n) noexcept
+    {
+        auto st{ St(n->state()) };
+        auto mv{ Mv() };
+        while (!_termCrit->finished(st)) {
+            // Create next node from the move
+            mv = _sim->simulate(st);
+            mv.apply(st);
+            _nodes[st] = new N(st, mv, n);
+            n = _nodes[st];
+        }
+    }
+
+    /*!
+     * \brief _backpropagate implementation of the "backpropagation stage"
+     * \param n the initial leaf node to start propagating from, will be modified during execution
+     * to point to the initial (root) node.
+     */
+    void _backpropagate(N* n) noexcept
+    {
+        auto eval{ _termEval->eval(n->state()) };
+        while (nullptr != n->parent()) {
+            n->update(eval);
+            n = n->parent();
+        }
+    }
+
+    /*!
+     * \brief _bestMoveSelection Selects the best move to play (best child of the root node)
+     * \return the best move
+     */
+    Mv _bestMoveSelection(void) noexcept
+    {
+        Mv       ret;
+        uint32_t max_visit_count{ 0 };
+        for (const auto& [mv, n] : _root.children()) {
+            if (n->visit_count() >= max_visit_count) {
+                max_visit_count = n->visit_count();
+                ret = mv;
+            }
+        }
+
+        return ret;
+    }
+
 protected:
-    SimulationStrategy<St, Mv> _sim;
-    ExpansionStrategy<St, Mv>  _exp;
+    /**
+     * User provided interfaces
+     */
+
+    std::shared_ptr<SimulationStrategy<St, Mv>> _sim;
+    std::shared_ptr<ExpansionStrategy<St, Mv>>  _exp;
+    std::shared_ptr<TerminalCriteria<St>>       _termCrit;
+    std::shared_ptr<TerminalEval<St>>           _termEval;
 
 private:
-    // Tree related structures
+    /**
+     * Tree related structures
+     */
+
     N                _root;  /*< The root of the tree */
     std::map<St, N*> _nodes; /*< Container for every nodes of the tree */
 
-    // Customizable params
+    /**
+     * Customizable params
+     */
+
     std::chrono::milliseconds _time_max{ default_time };
     float                     _C{ default_c };
     uint32_t                  _vis_expand_thresh{ default_vis };
     uint32_t                  _vis_uct_thresh{ default_vis_thresh };
 
-    // Other params
+    /**
+     * Other params
+     */
 
 private:
+    /**
+     * Default values for customizable params
+     */
+
     static constexpr uint32_t default_time{ 1000 };     /*< time in ms */
     static constexpr float    default_c{ 0.5 };         /*< UCT constant */
     static constexpr uint32_t default_vis{ 7 };         /*< nb of visits before expansion */
