@@ -171,7 +171,7 @@ public:
 /*!
  * @brief The Move class represents a move of the game.
  * It can be applied to a \a State in order to modify it.
- * @note Derived classes should be default constructible.
+ * @note Derived classes should be default constructible and have an operator== implementation
  */
 template<class St>
 class Move : public Printable
