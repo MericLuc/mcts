@@ -11,7 +11,7 @@ Yet another implementation of [Monte-Carlo Tree Search algorithm](https://en.wik
 
 ## How to use 
 
-**mcts** is packageg as a library, and you can use it as such :
+**mcts** is packaged as a library, and you can use it as such :
 
 ```
 add_subdirectory(mcts EXCLUDE_FROM_ALL)
