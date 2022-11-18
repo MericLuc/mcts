@@ -45,6 +45,8 @@ Install the project...
 ## TODO 
 
 - [ ] Actually write the code...
+- [ ] Remove stupid Node implementation (We do not need pointers)
+- [ ] Debug the "MCTS::advance()" function
 - [ ] Provide explanations (and resources) on how Monte-Carlo Tree Search works.
 - [ ] Explain how to use the mcts library (prerequisites).
 - [ ] Provide an example 
