@@ -9,7 +9,7 @@ Yet another implementation of [Monte-Carlo Tree Search algorithm](https://en.wik
 - A c++17 compliant compiler.
 - CMake > 3.10 (if you plan to use it as a library)
 
-## How to use 
+## How to build/install
 
 **mcts** is packaged as a library, and you can use it as such :
 
@@ -42,12 +42,38 @@ Install the project...
 -- Installing: ${YOUR_INSTALL_DIR}/mcts/include/mcts.hpp
 ```
 
+## How to use
+
+In order to use **mcts**, you are required to provide implementations of the following interfaces :
+  - **State** : State of the game.
+  - **Move** : Move of the game.
+  - **TerminalCriteria** : Criteria that allows to know when a State is final.
+  - **TerminalEval** : Evaluation function for a terminal State.
+  - **ExpansionStrategy** : Controls how the search tree is expanded.
+  - **SimulationStrategy** : Allows to self-play a game until it is final.
+  - **BackPropagationStrategy** : Controls the back propagation of the evaluation on the search tree.
+
+You might want to look at [**mcts.hpp**](./mcts.hpp) for more informations.
+
+## Applications
+
+### Tic Tac Toe
+
+- Sources : https://github.com/MericLuc/mcts-tic-tac-toe
+- Online demo : https://mericluc.github.io/mcts/tic-tac-toe/app.html
+
 ## TODO 
 
-- [ ] Actually write the code...
+- [x] Actually write the code...
 - [ ] Remove stupid Node implementation (We do not need pointers)
 - [ ] Debug the "MCTS::advance()" function
-- [ ] Provide explanations (and resources) on how Monte-Carlo Tree Search works.
-- [ ] Explain how to use the mcts library (prerequisites).
-- [ ] Provide an example 
-- [ ] Link to my project(s) that use it. 
+
+## Acknoledgements
+
+The whole project is fully-based on [this paper](https://dke.maastrichtuniversity.nl/m.winands/documents/pMCTS.pdf). 
+
+Another amazingly helpful article on [MCTS methods](http://www.incompleteideas.net/609%20dropbox/other%20readings%20and%20resources/MCTS-survey.pdf)
+
+You might want to check **better implementations** on which it is largely inspired :
+- https://github.com/Konijnendijk/cpp-mcts
+- https://github.com/steve3003/mcts-cpp
